@@ -40,7 +40,7 @@ namespace RedditWritesFanfic
         public string CommentLink => $"https://www.reddit.com/r/{Subreddit}/comments/{Id}/foo/{CommentId}/";
 
         [JsonIgnore]
-        public bool ShouldUpdate => (DateTime.Now - LastUpdate).TotalMinutes > 0;
+        public bool ShouldUpdate => (DateTime.Now - LastUpdate).TotalMinutes > 2;
 
 
         public Chapter()
