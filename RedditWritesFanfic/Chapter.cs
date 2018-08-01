@@ -1,10 +1,13 @@
-﻿using RedditSharp;
+﻿using Newtonsoft.Json;
+using RedditSharp;
 using RedditSharp.Things;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using static RedditSharp.Things.ModeratableThing;
 
 namespace RedditWritesFanfic
 {
@@ -12,7 +15,7 @@ namespace RedditWritesFanfic
     {
         public string Subreddit { get; set; }
 
-        public string ID { get; set; }
+        public string Id { get; set; }
 
         public string ParentId { get; set; }
 
@@ -25,48 +28,56 @@ namespace RedditWritesFanfic
         public DateTime LastUpdate { get; set; }
 
         public string CommentId { get; set; }
-
-        public string RedditLink => $"https://reddit.com/r/{Subreddit}/comments/{ID}/";
-
-        public bool IsPoisoned { get; set; }
         
+        public bool IsPoisoned { get; set; }
+
+
+        [JsonIgnore]
+        public string RedditLink => $"https://reddit.com/r/{Subreddit}/comments/{Id}/";
+
+
+        [JsonIgnore]
+        public string CommentLink => $"https://www.reddit.com/r/{Subreddit}/comments/{Id}/foo/{CommentId}/";
+
+        [JsonIgnore]
+        public bool ShouldUpdate => (DateTime.Now - LastUpdate).TotalMinutes > 0;
+
+
         public Chapter()
         {
-
         }
 
         
-        public bool Update(Reddit reddit, ChapterDictionary dict)
+        public async Task UpdateAsyc(Reddit reddit, ChapterDictionary dict)
         {
-            var myPost = reddit.GetPost(new Uri(RedditLink));
-            var shouldUpdateComment = false;
+            var myPost = await reddit.GetPostAsync(new Uri(RedditLink));
 
             var parentId = GetFirstChapterId(myPost.SelfText);
             if (ParentId != null && ParentId != parentId)
             {
                 if (dict.Chapters.TryGetValue(ParentId, out var oldParent))
-                    oldParent.Children.Remove(ID);
+                {
+                    oldParent.PoisonSelf(dict);
+                    oldParent.Children.Remove(Id);
+                }
             }
 
             ParentId = parentId;
             if (parentId != null && dict.Chapters.TryGetValue(ParentId, out var newParent))
             {
-                if (newParent.Children.Add(ID))
-                {
-                    shouldUpdateComment = true;
-                }
+                if (newParent.Children.Add(Id))
+                    newParent.PoisonSelf(dict);
             }
 
-            return shouldUpdateComment;
-        }
-        public void Update(Post post, ChapterDictionary dict)
-        {
+            if (CommentId == null)
+                PoisonSelf(dict);
 
+            LastUpdate = DateTime.Now;
         }
 
-        public List<Chapter> UpdateOrCreateComment(Reddit reddit, ChapterDictionary dict)
+        public async Task UpdateOrCreateComment(Reddit reddit, ChapterDictionary dict)
         {
-            Console.WriteLine("Updating the stickied post for this comment.");
+            Console.WriteLine("Updating comment for: {0} ({1})", Id, PostTitle);
             var text = GetStickyText(dict);
 
             List<Chapter> res = new List<Chapter>();
@@ -74,35 +85,66 @@ namespace RedditWritesFanfic
 
             if (CommentId == null)
             {
-                var post = reddit.GetPost(new Uri(RedditLink));
-                var comment = post.Comment(text);
-                comment.Distinguish(VotableThing.DistinguishType.Moderator);
+                Console.Write("Creating new comment for {0}... ", Id);
+                var post = await reddit.GetPostAsync(new Uri(RedditLink));
+                var comment = await post.CommentAsync(text);
+                await comment.DistinguishAsync(DistinguishType.Moderator, true);
                 CommentId = comment.Id;
+                Console.WriteLine("Done! CommendId is {0}", CommentId);
             }
             else
             {
-                var comment = (Comment)reddit.GetThingByFullname(CommentId);
-                comment.EditText(text);
-                comment.Save();
+                var post = await reddit.GetPostAsync(new Uri(RedditLink));
+                var comments = await post.GetCommentsAsync(5, CommentSort.Best);
+
+                var myComment = comments.SingleOrDefault(a => a.Id == CommentId);
+                
+                if (myComment == null)
+                {
+                    Console.WriteLine("Couldn't find our comment {0} for {1}, recreating.", CommentId, Id);
+                    CommentId = null;
+                    await UpdateOrCreateComment(reddit, dict);
+                    return;
+                }
+
+                if (myComment.Distinguished != DistinguishType.Moderator)
+                    await myComment.DistinguishAsync(DistinguishType.Moderator, true);
+                
+                if (myComment.Body != text)
+                {
+                    Console.WriteLine("Actually updating comment {0} for post {1}", CommentId, Id);
+                    await (myComment).EditTextAsync(text);
+                }
+                else
+                {
+                    Console.WriteLine("Comment {0} for post {1} has not changed - ignoring :)", CommentId, Id);
+                }
             }
 
-            if (ParentId != null && dict.Chapters.TryGetValue(ParentId, out var parent))
-            {
-                res.AddRange(parent.UpdateStickiedComment(reddit, dict));
-            }
-
-            return res;
+            IsPoisoned = false;
         }
 
         private string GetStickyText(ChapterDictionary dict)
         {
-            if (Children.Count == 0)
-                return "There don't seem to be any following chapters";
-
             var sb = new StringBuilder();
+
+            sb.AppendLine("[Disclaimer](https://www.reddit.com/r/RedditWritesFanfic/comments/93ps6d/disclaimer/)");
+            sb.AppendLine();
+
+            var urlencodedLink = Uri.EscapeDataString(RedditLink);
+            var link = $"https://www.reddit.com/r/{Subreddit}/submit?selftext=true&text=[Previous%20Chapter]({urlencodedLink})%20%0A%0AWrite%20your%20story%20here!&title=Chapter%20Title";
+            sb.AppendLine($"## [Continue this story!]({link})");
+            
+            if (Children.Count == 0)
+            {
+                return sb.ToString();
+            }
+
+            sb.AppendLine("-----");
+            sb.AppendLine();
             sb.AppendLine("## Next Chapters:");
             sb.AppendLine("");
-            foreach (var child in dict.EnumarteChildren(Children))
+            foreach (var child in dict.EnumerateChildren(Children))
             {
                 sb.AppendFormat("* **[{0}]({1})** by /u/{2} - {3} Chapters deep!\n", child.PostTitle, child.RedditLink, child.Author, child.GetDepth(dict) + 1);
             }
@@ -110,12 +152,19 @@ namespace RedditWritesFanfic
             return sb.ToString();
         }
 
+        private void PoisonSelf(ChapterDictionary dict)
+        {
+            IsPoisoned = true;
+            if (ParentId != null && dict.Chapters.TryGetValue(ParentId, out var parent))
+                parent.PoisonSelf(dict);
+        }
+
         public int GetDepth(ChapterDictionary dict)
         {
             if (Children.Count == 0)
                 return 0;
 
-            return dict.EnumarteChildren(Children).Max(a => a.GetDepth(dict)) + 1;
+            return dict.EnumerateChildren(Children).Max(a => a.GetDepth(dict)) + 1;
         }
         
         private string GetFirstChapterId(string text)
